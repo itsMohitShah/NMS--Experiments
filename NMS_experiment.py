@@ -42,6 +42,23 @@ def generate_similar_bbox(gt_bbox, offset_range):
 
     return [new_x1,new_y1, new_x2, new_y2]
 
+def augment_bbox_big(bbox):
+    augment_range_x = 0.2*(bbox[2]-bbox[0])
+    augment_range_y = 0.2*(bbox[3]-bbox[1])
+    new_x1 = max(0,bbox[0]-augment_range_x)
+    new_y1 = max(0,bbox[1]-augment_range_y)
+    new_x2 = min(768,bbox[2]+augment_range_x)
+    new_y2 = min(768,bbox[3]+augment_range_y)
+    return [new_x1,new_y1,new_x2,new_y2]
+
+def augment_bbox_small(bbox):
+    augment_range_x = 0.2*(bbox[2]-bbox[0])
+    augment_range_y = 0.2*(bbox[3]-bbox[1])
+    new_x1 = max(0,bbox[0]-augment_range_x)
+    new_y1 = max(0,bbox[1]-augment_range_y)
+    new_x2 = min(768,bbox[2]+augment_range_x)
+    new_y2 = min(768,bbox[3]+augment_range_y)
+    return [new_x1,new_y1,new_x2,new_y2]
 
 def calculate_iou(bbox1, bbox2):
 
@@ -71,7 +88,7 @@ def xyxytoxywh(bbox):
 
 
 def main(iterations = 5,clearall = False):
-    path_images_folder = 'Images'
+    path_images_folder = 'Images_AugmentedBoxes'
     path_bothsuppressed_folder = os.path.join(path_images_folder,'BothSuppressed')
     path_nonesuppressed_folder = os.path.join(path_images_folder,'NoneSuppressed')
     path_xyxy_folder = os.path.join(path_images_folder,'XYXY')
@@ -120,39 +137,52 @@ def main(iterations = 5,clearall = False):
         canvas_correctNMS = canvas.copy()
         canvas_customNMS = canvas.copy()        
 
-        cv2.rectangle(canvas, (bbox1[0], bbox1[1]), (bbox1[2], bbox1[3]), (255, 0, 0), 2)  # Similar box 1 in blue
-        cv2.rectangle(canvas, (bbox2[0], bbox2[1]), (bbox2[2], bbox2[3]), (0, 0, 255), 2)  # Similar box 2 in red
+        # cv2.rectangle(canvas, (bbox1[0], bbox1[1]), (bbox1[2], bbox1[3]), (255, 0, 0), 2)  # Similar box 1 in blue
+        # cv2.rectangle(canvas, (bbox2[0], bbox2[1]), (bbox2[2], bbox2[3]), (0, 0, 255), 2)  # Similar box 2 in red
 
         bbox1_xywh = xyxytoxywh(bbox1)
         bbox2_xywh = xyxytoxywh(bbox2)
+        #! Swapping the Bbox values. They are now in xywh format
+        bbox1_xyxy = bbox1
+        bbox2_xyxy = bbox2
 
-        list_bbox_xywh = [bbox1_xywh,bbox2_xywh]
-        list_bbox = [bbox1,bbox2]
+        bbox1 = bbox1_xywh
+        bbox2 = bbox2_xywh
+
+
+        list_bbox = [bbox1_xywh,bbox2_xywh]
+        list_bbox_xyxy = [bbox1_xyxy,bbox2_xyxy]
+        list_bbox_custom1 = [augment_bbox_big(bbox1),augment_bbox_small(bbox2)]
+        list_bbox_custom2 = [augment_bbox_small(bbox1),augment_bbox_big(bbox2)]
         list_conf = [0.90,0.65]
         list_colour = [(255, 0, 0),(0, 0, 255)]
-        idx_CorrectNMS = cv2.dnn.NMSBoxes(list_bbox_xywh,list_conf,0.3,0.5)
-        idx_CustomNMS = cv2.dnn.NMSBoxes(list_bbox,list_conf,0.3,0.5)
+        idx_CorrectNMS = cv2.dnn.NMSBoxes(list_bbox,list_conf,0.3,0.5)
+        idx_CustomNMS1 = cv2.dnn.NMSBoxes(list_bbox_custom1,list_conf,0.3,0.5)
+        idx_CustomNMS2 = cv2.dnn.NMSBoxes(list_bbox_custom2,list_conf,0.3,0.5)
 
+        idx_common = list(set(idx_CustomNMS1).intersection(idx_CustomNMS2))
 
 
         # Draw the bounding boxes on the canvas
-        for idx in range(len(list_bbox)):
-            cv2.rectangle(canvas, (list_bbox[idx][0], list_bbox[idx][1]), (list_bbox[idx][2], list_bbox[idx][3]), list_colour[idx], 2)  
+        for idx in range(len(list_bbox_xyxy)):
+            cv2.rectangle(canvas, (list_bbox_xyxy[idx][0], list_bbox_xyxy[idx][1]), (list_bbox_xyxy[idx][2], list_bbox_xyxy[idx][3]), list_colour[idx], 2)  
 
         # Draw the bounding boxes on the canvas
         for idx in idx_CorrectNMS:
-            cv2.rectangle(canvas_correctNMS, (list_bbox[idx][0], list_bbox[idx][1]), (list_bbox[idx][2], list_bbox[idx][3]), list_colour[idx], 2)  
+            cv2.rectangle(canvas_correctNMS, (list_bbox_xyxy[idx][0], list_bbox_xyxy[idx][1]), (list_bbox_xyxy[idx][2], list_bbox_xyxy[idx][3]), list_colour[idx], 2)  
         # Draw the bounding boxes on the canvas
-        for idx in idx_CustomNMS:
-            cv2.rectangle(canvas_customNMS, (list_bbox[idx][0], list_bbox[idx][1]), (list_bbox[idx][2], list_bbox[idx][3]), list_colour[idx], 2)  
+        for idx in idx_common:
+            # if idx in idx_CustomNMS2:
+            cv2.rectangle(canvas_customNMS, (list_bbox_xyxy[idx][0], list_bbox_xyxy[idx][1]), (list_bbox_xyxy[idx][2], list_bbox_xyxy[idx][3]), list_colour[idx], 2)
+
 
 
         # Display the result
         plt.imshow(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
         plt.title(f'{i+1}{iterations}\nBlue: {bbox1}\nRed: {bbox2}\nBoxes with IoU: {iou}', fontsize = 10)
         # plt.show()
-        if len(idx_CorrectNMS) == len(idx_CustomNMS):
-            if len(idx_CustomNMS) == 2:
+        if len(idx_CorrectNMS) == len(idx_common):
+            if len(idx_CorrectNMS) == 2:
                 filename = os.path.join(path_nonesuppressed_folder,"NOTSuppressedinBothCases_image_{}.png")
             else:
                 filename = os.path.join(path_bothsuppressed_folder,"SuppressedinBothCases_image_{}.png")
@@ -183,5 +213,5 @@ def main(iterations = 5,clearall = False):
         plt.close()
 
 if __name__ == "__main__":
-    main(clearall=False, iterations= 1000)
+    main(clearall=True, iterations= 1000)
 
