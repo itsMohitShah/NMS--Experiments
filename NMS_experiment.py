@@ -5,60 +5,11 @@ import matplotlib.pyplot as plt
 import random
 from tqdm import tqdm
 import shutil
+import math
+from nmsutils import *
+import pandas as pd
 
 
-
-
-# Function to generate a random bounding box
-def generate_random_bbox(canvas_size):
-    x1 = random.randint(0, 758)
-    y1 = random.randint(0, 758)
-
-    x2 = random.randint(x1, 768)
-    y2 = random.randint(y1, 768)
-    return [x1, y1, x2, y2]
-
-# Function to generate a similar bounding box with some offset
-def generate_similar_bbox(gt_bbox, offset_range):
-
-    new_x1 = random.randint(max(0, gt_bbox[0] - offset_range), min(gt_bbox[0] + offset_range, 758))
-    new_y1 = random.randint(max(0, gt_bbox[1] - offset_range), min(gt_bbox[1] + offset_range, 758))
-    while True:
-        try:
-            new_x2 = random.randint(max(0, gt_bbox[2] - offset_range), min(gt_bbox[2] + offset_range, 758))
-            if new_x2-new_x1 < 10:
-                new_x2+=10
-            new_y2 = random.randint(max(0, gt_bbox[3] - offset_range), min(gt_bbox[3] + offset_range, 758))
-            if new_y2-new_y1 < 10:
-                new_y2+=10
-        except ValueError:
-            new_x2 = 768
-            new_y2 = 768
-        break
-    if new_x1 > new_x2:
-        new_x1, new_x2 = new_x2, new_x1
-    if new_y1 > new_y2:
-        new_y1, new_y2 = new_y2, new_y1
-
-    return [new_x1,new_y1, new_x2, new_y2]
-
-def augment_bbox_big(bbox):
-    augment_range_x = 0.2*(bbox[2]-bbox[0])
-    augment_range_y = 0.2*(bbox[3]-bbox[1])
-    new_x1 = max(0,bbox[0]-augment_range_x)
-    new_y1 = max(0,bbox[1]-augment_range_y)
-    new_x2 = min(768,bbox[2]+augment_range_x)
-    new_y2 = min(768,bbox[3]+augment_range_y)
-    return [new_x1,new_y1,new_x2,new_y2]
-
-def augment_bbox_small(bbox):
-    augment_range_x = 0.2*(bbox[2]-bbox[0])
-    augment_range_y = 0.2*(bbox[3]-bbox[1])
-    new_x1 = max(0,bbox[0]-augment_range_x)
-    new_y1 = max(0,bbox[1]-augment_range_y)
-    new_x2 = min(768,bbox[2]+augment_range_x)
-    new_y2 = min(768,bbox[3]+augment_range_y)
-    return [new_x1,new_y1,new_x2,new_y2]
 
 def calculate_iou(bbox1, bbox2):
 
@@ -72,23 +23,37 @@ def calculate_iou(bbox1, bbox2):
     yB = max(bbox1[1], bbox2[1])
 
     intersection = max(0, xA-xB) * max(0, yA-yB)
+    w1, h1 = bbox1[2]-bbox1[0], bbox1[3]-bbox1[1]
+    w2, h2 = bbox2[2]-bbox2[0], bbox2[3]-bbox2[1]
 
-    box1_area = (bbox1[2]-bbox1[0])*(bbox1[3]-bbox1[1])
-    box2_area = (bbox2[2]-bbox2[0])*(bbox2[3]-bbox2[1])
+    box1_area = (w1)*(h1)
+    box2_area = (w1)*(h2)
     union = (box1_area)+(box2_area) - intersection
     if union == 0:
         print(f"Union of following boxes = 0:: Box1: {bbox1}\nBox2: {bbox2}")
     iou = intersection/union
-    return iou
+    eps=1e-7
 
+    cw = max(bbox1[2],bbox2[2]) - min(bbox1[0],bbox2[0])  # convex (smallest enclosing box) width
+    ch = max(bbox1[3],bbox2[3]) - min(bbox1[1],bbox2[1])  # convex height
 
-def xyxytoxywh(bbox):
-    return[bbox[0], bbox[1], bbox[2]-bbox[0], bbox[3]-bbox[1]]
+    c2 = cw**2 + ch**2 + eps  # convex diagonal squared
+    rho2 = (
+        (bbox2[0] + bbox2[2] - bbox1[0] - bbox1[2])**2 + (bbox2[1] + bbox2[3] - bbox1[1] - bbox1[3])**2) / 4  # center dist**2
+
+    v = (4 / math.pi**2) * (np.arctan(w2 / h2) - np.arctan(w1 / h1))**2            
+    alpha = v / (v - iou + (1 + eps))
+    ciou =  iou - (rho2 / c2 + v * alpha)  # CIoU
+    diou =  iou - rho2 / c2  # DIoU
+    c_area = cw * ch + eps  # convex area
+    giou = iou - (c_area - union) / c_area  # GIoU https://arxiv.org/pdf/1902.09630.pdf
+    return iou, giou, diou, ciou
+
 
 
 
 def main(iterations = 5,clearall = False):
-    path_images_folder = 'Images_AugmentedBoxes'
+    path_images_folder = 'Images_NMS'
     path_bothsuppressed_folder = os.path.join(path_images_folder,'BothSuppressed')
     path_nonesuppressed_folder = os.path.join(path_images_folder,'NoneSuppressed')
     path_xyxy_folder = os.path.join(path_images_folder,'XYXY')
@@ -99,6 +64,15 @@ def main(iterations = 5,clearall = False):
     os.makedirs(path_bothsuppressed_folder, exist_ok=True)
     os.makedirs(path_nonesuppressed_folder, exist_ok=True)
     os.makedirs(path_xyxy_folder, exist_ok=True)
+    df = pd.DataFrame({'Image':[],
+                       'GT':[],
+                       'BBox1':[],
+                       'BBox2':[],
+                       'Status':[],
+                       'IoU':[],
+                       'GIoU':[],
+                       'DIoU':[],
+                       'CIoU':[]})
     for i in tqdm(range(iterations)):
         position_x = 20
         position_y = 20
@@ -119,20 +93,19 @@ def main(iterations = 5,clearall = False):
         # Generate two similar bounding boxes
         bbox1 = generate_similar_bbox(gt_bbox, offset_range)
         bbox2 = generate_similar_bbox(gt_bbox, offset_range)
-        iou = calculate_iou(bbox1,bbox2)
+        iou, giou, diou, ciou = calculate_iou(bbox1,bbox2)
 
         # Draw the bounding boxes on the canvas
         cv2.rectangle(canvas, (gt_bbox[0], gt_bbox[1]), (gt_bbox[2], gt_bbox[3]), (0, 255, 0), 2)  # Ground truth in green
 
         
-        canvas = cv2.putText(canvas, f"GT: {gt_bbox}", (position_x, position_y),
-                            font, font_size, (0, 255, 0), font_thickness)
-        canvas = cv2.putText(canvas, f"Bbox1: {bbox1}", (position_x, position_y+20),
-                            font, font_size,(255, 0, 0), font_thickness)
-        canvas = cv2.putText(canvas, f"Bbox2: {bbox2}", (position_x, position_y+40),
-                            font, font_size, (0, 0, 255), font_thickness)
-        canvas = cv2.putText(canvas, "IoU: {:.2f}".format(iou), (position_x, position_y+60),
-                            font, font_size, (0, 0, 0), font_thickness)
+        canvas = cv2.putText(canvas, f"GT: {gt_bbox}", (position_x, position_y),font, font_size, (0, 255, 0), font_thickness)
+        canvas = cv2.putText(canvas, f"Bbox1: {bbox1}", (position_x, position_y+20),font, font_size,(255, 0, 0), font_thickness)
+        canvas = cv2.putText(canvas, f"Bbox2: {bbox2}", (position_x, position_y+40),font, font_size, (0, 0, 255), font_thickness)
+        canvas = cv2.putText(canvas, "IoU: {:.2f}".format(iou), (position_x, position_y+60),font, font_size, (0, 0, 0), font_thickness)
+        canvas = cv2.putText(canvas, "GIoU: {:.2f}".format(giou), (position_x, position_y+80),font, font_size, (0, 0, 0), font_thickness)
+        canvas = cv2.putText(canvas, "DIoU: {:.2f}".format(diou), (position_x, position_y+100),font, font_size, (0, 0, 0), font_thickness)
+        canvas = cv2.putText(canvas, "CIoU: {:.2f}".format(ciou), (position_x, position_y+120),font, font_size, (0, 0, 0), font_thickness)
         
         canvas_correctNMS = canvas.copy()
         canvas_customNMS = canvas.copy()        
@@ -152,15 +125,12 @@ def main(iterations = 5,clearall = False):
 
         list_bbox = [bbox1_xywh,bbox2_xywh]
         list_bbox_xyxy = [bbox1_xyxy,bbox2_xyxy]
-        list_bbox_custom1 = [augment_bbox_big(bbox1),augment_bbox_small(bbox2)]
-        list_bbox_custom2 = [augment_bbox_small(bbox1),augment_bbox_big(bbox2)]
         list_conf = [0.90,0.65]
         list_colour = [(255, 0, 0),(0, 0, 255)]
         idx_CorrectNMS = cv2.dnn.NMSBoxes(list_bbox,list_conf,0.3,0.5)
-        idx_CustomNMS1 = cv2.dnn.NMSBoxes(list_bbox_custom1,list_conf,0.3,0.5)
-        idx_CustomNMS2 = cv2.dnn.NMSBoxes(list_bbox_custom2,list_conf,0.3,0.5)
+        idx_NMSXYXY = cv2.dnn.NMSBoxes(list_bbox_xyxy,list_conf,0.3,0.5)
 
-        idx_common = list(set(idx_CustomNMS1).intersection(idx_CustomNMS2))
+
 
 
         # Draw the bounding boxes on the canvas
@@ -171,7 +141,7 @@ def main(iterations = 5,clearall = False):
         for idx in idx_CorrectNMS:
             cv2.rectangle(canvas_correctNMS, (list_bbox_xyxy[idx][0], list_bbox_xyxy[idx][1]), (list_bbox_xyxy[idx][2], list_bbox_xyxy[idx][3]), list_colour[idx], 2)  
         # Draw the bounding boxes on the canvas
-        for idx in idx_common:
+        for idx in idx_NMSXYXY:
             # if idx in idx_CustomNMS2:
             cv2.rectangle(canvas_customNMS, (list_bbox_xyxy[idx][0], list_bbox_xyxy[idx][1]), (list_bbox_xyxy[idx][2], list_bbox_xyxy[idx][3]), list_colour[idx], 2)
 
@@ -179,15 +149,17 @@ def main(iterations = 5,clearall = False):
 
         # Display the result
         plt.imshow(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
-        plt.title(f'{i+1}{iterations}\nBlue: {bbox1}\nRed: {bbox2}\nBoxes with IoU: {iou}', fontsize = 10)
-        # plt.show()
-        if len(idx_CorrectNMS) == len(idx_common):
+        plt.title(f'{i+1}{iterations}\nBlue: {bbox1}\nRed: {bbox2}\nIoU: {iou}', fontsize = 10)
+        if len(idx_CorrectNMS) == len(idx_NMSXYXY):
             if len(idx_CorrectNMS) == 2:
                 filename = os.path.join(path_nonesuppressed_folder,"NOTSuppressedinBothCases_image_{}.png")
+                status = 'NotSuppressedinBothCases'
             else:
                 filename = os.path.join(path_bothsuppressed_folder,"SuppressedinBothCases_image_{}.png")
+                status = 'SuppressedinBothCases'
         else:
             filename = os.path.join(path_xyxy_folder,"XYXY_image_{}.png")
+            status = 'XYXY'
         filecounter = 0
         while os.path.isfile(filename.format(filecounter)):
             filecounter+=1
@@ -211,6 +183,10 @@ def main(iterations = 5,clearall = False):
 
         finalimage.savefig(filename)
         plt.close()
+        list_allinfo = [os.path.split(filename)[-1],gt_bbox,bbox1_xyxy,bbox2_xyxy,status,iou,giou,diou,ciou]
+        df.loc[len(df)] = list_allinfo
+
+        df.to_excel(os.path.join(path_images_folder,'Results.xlsx'))
 
 if __name__ == "__main__":
     main(clearall=True, iterations= 1000)
